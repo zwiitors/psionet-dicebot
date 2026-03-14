@@ -12,6 +12,7 @@ from aiohttp import web  # Webサーバー用に追記
 
 # 定数
 WAIT_TIME = 0.07
+PING_DELAY = 20
 
 dotenv.load_dotenv()
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or dotenv.get_key(
@@ -24,6 +25,7 @@ bot = commands.Bot(intents=discord.Intents.all(), command_prefix="/")
 # --- ダミーWebサーバーの設定 ---
 async def handle_ping(request):
     """ヘルスチェック用のレスポンスを返す"""
+    await asyncio.sleep(PING_DELAY)
     return web.Response(text="Bot is running")
 
 
