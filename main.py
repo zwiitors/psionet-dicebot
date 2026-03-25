@@ -1,6 +1,8 @@
 # 0.1.14
 import discord
+from discord.ui import Button, View
 from discord.ext import commands
+from discord import app_commands
 import random
 from collections import defaultdict
 import asyncio
@@ -44,6 +46,7 @@ async def start_web_server():
 async def setup_hook():
     """ボット起動時にWebサーバーのタスクを追加する"""
     bot.loop.create_task(start_web_server())
+    await bot.tree.sync()
 
 
 # -------------------------------
@@ -299,6 +302,177 @@ async def r_cost(ctx, cost):
     cost_before = VariablesManager.reroll_cost[ctx.author.id]
     VariablesManager.reroll_cost[ctx.author.id] = cost
     await ctx.send(f"reroll cost changed to {cost_before}->{cost}")
+
+
+def dice_loop(
+    user_id,
+    target_results,
+    attempts,
+    result,
+):
+    while True:
+        if attempts >= 5:
+            break
+        success_rate = target_results[attempts]
+        result = random.randint(1, 100)
+
+        if result <= success_rate:
+            VariablesManager.messages[user_id].append(
+                f"1d100({success_rate}%)->{result}"
+            )
+            attempts += 1
+            continue
+        else:
+            VariablesManager.messages[user_id].append(
+                f"1d100({success_rate}%)->{result}: Failure"
+            )
+            break
+    return result, attempts
+
+
+class DiceBotView(View):
+    def __init__(self, user_id, rate, repeat, bonus_list):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.rate = rate
+        self.target_results = [min(rate // i, 95) for i in range(1, 6)]
+        self.repeat = repeat
+        self.bonus_list = bonus_list
+        self.results = [0 for _ in range(repeat)]
+        self.achievement = [0 for _ in range(repeat)]
+        self.attempts_list = [0 for _ in range(repeat)]
+        self.reroll_cost = VariablesManager.reroll_cost[user_id]
+        self.used_mp = 0
+        self.reroll_number = 0
+        self.int_res_list = [0 for _ in range(repeat)]
+        self.fin = False
+        self.ms = ""
+        self.func_ids = []
+        self.dice_log = []
+
+    @discord.ui.button(label="Reroll", style=discord.ButtonStyle.primary)
+    async def reroll(self, interaction: discord.Interaction, button: Button):
+        interaction_user_id = interaction.user.id
+        if interaction_user_id != self.user_id:
+            await interaction.response.send_message(
+                "You cannot use this button.", ephemeral=True
+            )
+            return
+        self.used_mp += self.reroll_cost
+        self.reroll_number += 1
+        if self.fin_check():
+            self.on_timeout(interaction)
+        if VariablesManager.messages[interaction.user.id]:
+            await interaction.response.edit_message(
+                "\n".join(VariablesManager.messages[interaction.user.id])
+            )
+
+    @discord.ui.button(label="Modify", style=discord.ButtonStyle.secondary)
+    async def modify(self, interaction: discord.Interaction, button: Button):
+        interaction_user_id = interaction.user.id
+        if interaction_user_id != self.user_id:
+            await interaction.response.send_message(
+                "You cannot use this button.", ephemeral=True
+            )
+            return
+        for f in self.func_ids:
+            if self.attempts_list[f] == 5:
+                continue
+            result = self.results[f]
+            attempts = self.attempts_list[f]
+            next_target = self.target_results[attempts]
+            self.used_mp += max(result - next_target, 0)
+            self.modify_cost += max(result - next_target, 0)
+            self.results[f] = self.target_results[attempts]
+            self.attempts_list[f] += 1
+            VariablesManager.messages[interaction.user.id].append(
+                f"1d100({self.target_results[attempts]}%)->{result}->{self.results[f]} {self.achievement[f] + 1}"
+            )
+        if self.fin_check():
+            self.on_timeout(interaction)
+        if VariablesManager.messages[interaction.user.id]:
+            await interaction.response.edit_message(
+                "\n".join(VariablesManager.messages[interaction.user.id])
+            )
+        VariablesManager.messages[interaction.user.id] = []
+
+    @discord.ui.button(label="Finish", style=discord.ButtonStyle.danger)
+    async def finish(self, interaction: discord.Interaction, button: Button):
+        interaction_user_id = interaction.user.id
+        if interaction_user_id != self.user_id:
+            await interaction.response.send_message(
+                "You cannot use this button.", ephemeral=True
+            )
+            return
+        self.on_timeout(interaction)
+
+    def fin_check(self):
+        return all([5 <= a for a in self.attempts_list])
+
+    async def on_timeout(self, interaction: discord.Interaction):
+        result = f"{self.achievement} reroll x{self.reroll_number} & modified:{self.modify_cost}-> used mp:{self.used_mp} "
+        VariablesManager.messages[self.user_id].append(result)
+        await interaction.response.edit_message(
+            "\n".join(VariablesManager.messages[interaction.user.id])
+        )
+        VariablesManager.messages[interaction.user.id] = []
+        self.stop()
+
+    def common_loop(self):
+        for f in self.func_ids:
+            if self.attempts_list[f] == 5:
+                continue
+            result, attempts = dice_loop(self.attempts_list[f], self.results[f])
+            ach = self.bonus_list[f] + attempts
+            self.results[f] = result
+            self.achievement[f] = ach
+            self.attempts_list[f] = attempts
+        for r in range(self.repeat):
+            if self.attempts_list[r] >= 5:
+                int_res = f"{r + 1}. {self.results[r]} {self.achievement[r]}: highest"
+            else:
+                nxt_tgt = self.target_results[self.attempts_list[r]]
+                int_res = f"{r + 1}. {self.results[r]} {self.achievement[r]} next: {nxt_tgt}\nfinish/reroll({self.used_mp + self.reroll_cost})/modify({self.used_mp + max(self.results[r] - nxt_tgt, 0)})"
+            self.int_res_list[r] = int_res
+
+
+@bot.tree.command(name="roll_command", description="行為判定を行う。")
+@app_commands.describe(
+    rate="成功率 (例: 135)",
+    repeat="行為回数 (例: 3)",
+    bonus="達成度ボーナス (例: 2,2,1)",
+)
+# 仮実装
+async def roll_command(
+    interaction: discord.Interaction, rate: int, repeat: int = 1, bonus: str = "0"
+):
+    bonus_list = list(map(int, bonus.split(",")))
+    for _ in range(repeat - len(bonus_list)):
+        bonus_list.append(0)
+    view = DiceBotView(interaction.user.id, rate, repeat, bonus_list)
+    for r in range(repeat):
+        result, attempts = dice_loop(
+            interaction.user.id,
+            view.target_results,
+            view.attempts_list[r],
+            view.results[r],
+        )
+
+        ach = view.bonus_list[r] + attempts
+        if attempts >= 5:
+            int_res = f"{r + 1}. {result} {ach}: highest"
+        else:
+            nxt_tgt = view.target_results[attempts]
+            mod_cost = view.used_mp + max(result - nxt_tgt, 0)
+            rrl_cost = view.used_mp + view.reroll_cost
+            int_res = f"{r + 1}. {result} {ach} next: {nxt_tgt}\nfinish/reroll({rrl_cost})/modify({mod_cost})"
+        view.results[r] = result
+        view.achievement[r] = ach
+        view.attempts_list[r] = attempts
+        view.int_res_list[r] = int_res
+    await interaction.response.send_message(
+        "\n".join(VariablesManager.messages[interaction.user.id]), view=view
+    )
 
 
 if __name__ == "__main__":
