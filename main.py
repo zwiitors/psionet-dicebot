@@ -2,18 +2,24 @@
 import discord
 from discord.ui import Button, View
 from discord.ext import commands
-from discord import app_commands
+from discord import app_commands, Interaction
 import random
 from collections import defaultdict
 import asyncio
 import dotenv
 import os
-from aiohttp import web  # Webサーバー用に追記
+from nacl.signing import VerifyKey, BadSignatureError  # インタラクションの検証用に追記
+from quart import Quart, request
+import json
+from aiohttp import web
 
 # ボットのトークンを設定してください
 
 # 定数
 WAIT_TIME = 0.07
+PORT = int(
+    os.environ.get("PORT", 8080)
+)  # Renderは環境変数PORTでリッスンするポートを指定する
 
 dotenv.load_dotenv()
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or dotenv.get_key(
@@ -21,6 +27,25 @@ TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or dotenv.get_key(
 )  # Renderの環境変数対応のため修正
 client = discord.Client(intents=discord.Intents.all())
 bot = commands.Bot(intents=discord.Intents.all(), command_prefix="/")
+app = Quart(__name__)
+
+verify_key = VerifyKey(
+    bytes.fromhex(os.environ.get("DISCORD_PUBLIC_KEY"))
+)  # Renderの環境変数対応のため修正
+
+
+async def verify_and_get_data():
+    signature = request.header.get("X-Signature-Ed25519")
+    timestamp = request.header.get("X-Signature-Timestamp")
+    body_bytes = await request.get_data()
+
+    if not signature or not timestamp:
+        return None
+    try:
+        verify_key.verify(timestamp.encode() + body_bytes, bytes.fromhex(signature))
+        return json.loads(body_bytes)
+    except BadSignatureError:
+        return None
 
 
 # --- ダミーWebサーバーの設定 ---
@@ -41,12 +66,6 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Web server started on port {port}")
-
-
-async def setup_hook():
-    """ボット起動時にWebサーバーのタスクを追加する"""
-    bot.loop.create_task(start_web_server())
-    await bot.tree.sync()
 
 
 # -------------------------------
@@ -475,6 +494,28 @@ async def roll_command(
     )
 
 
+@app.route("/interactions", methods=["POST"])
+async def interactions():
+    data = await verify_and_get_data()
+    if data is None:
+        return "Unauthorized", 401
+    if data["type"] == 1:  # PING
+        return {"type": 1}, 200
+    interaction = Interaction(data=data, state=bot._connection)
+    await bot.tree.execute_interaction(interaction)
+
+    # ここでインタラクションの処理を行う
+    # 例: コマンドの実行、ボタンのクリックなど
+
+    return "", 200  # ACK
+
+
+async def main():
+    bot.loop.create_task(start_web_server())
+    await bot.start(TOKEN)
+    await app.run_task(host="0.0.0.0", port=PORT)
+    await bot.tree.sync()
+
+
 if __name__ == "__main__":
-    bot.setup_hook = setup_hook
-    bot.run(TOKEN)
+    asyncio.run(main())
