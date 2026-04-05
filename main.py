@@ -35,8 +35,8 @@ verify_key = VerifyKey(
 
 
 async def verify_and_get_data():
-    signature = request.header.get("X-Signature-Ed25519")
-    timestamp = request.header.get("X-Signature-Timestamp")
+    signature = request.headers.get("X-Signature-Ed25519")
+    timestamp = request.headers.get("X-Signature-Timestamp")
     body_bytes = await request.get_data()
 
     if not signature or not timestamp:
@@ -511,10 +511,10 @@ async def interactions():
 
 
 async def main():
-    bot.loop.create_task(start_web_server())
-    await bot.start(TOKEN)
-    await app.run_task(host="0.0.0.0", port=PORT)
+    # bot.loop.create_task(start_web_server())
+    await bot.login(TOKEN)
     await bot.tree.sync()
+    await app.run_task(host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
