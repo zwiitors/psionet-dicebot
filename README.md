@@ -60,4 +60,5 @@ f
 ```
 
 # 3. インストール方法
-WIP
+以下のリンクにアクセスすることで、自分が管理者であるDiscordサーバーにダイスボットを参加させられる。
+https://discord.com/oauth2/authorize?client_id=1233209016663015455
